@@ -1,0 +1,354 @@
+import os # <--- ده موجود اصلا
+import json
+import logging
+import datetime
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    BotCommand,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+# =========================
+# الإعدادات
+# =========================
+TOKEN = os.environ.get("TOKEN") # <--- عدلت السطر ده بس عشان الامان
+if TOKEN is None:
+    raise RuntimeError("حط التوكن في Environment Variables بتاعت Render باسم TOKEN")
+
+ADMIN_ID = 6104865069
+GROUP_ID = -1001234567890 # <--- حط ايدي الجروب هنا عشان الاعلان
+BOT_USERNAME = "bot_KEALDE_Vip_BOT"
+NUMBERS_FILE = "numbers.json"
+USERS_FILE = "users.json"
+REFERRAL_BONUS = 0.05
+NUMBERS_PER_PAGE = 3
+
+COUNTRIES = {
+    "us": {"name": "United States", "flag": "🇺🇸", "prefix": "+1", "price": 0.0050, "numbers": []}, # امريكا
+    "ml": {"name": "Mali", "flag": "🇲🇱", "prefix": "+223", "price": 0.0020, "numbers": []},
+    "cf": {"name": "Central African", "flag": "🇨🇫", "prefix": "+236", "price": 0.0020, "numbers": []},
+    "tg": {"name": "Togo", "flag": "🇹🇬", "prefix": "+228", "price": 0.0020, "numbers": []},
+    "sd": {"name": "Sudan", "flag": "🇸🇩", "prefix": "+249", "price": 0.0020, "numbers": []},
+    "be": {"name": "Belgium", "flag": "🇧🇪", "prefix": "+32", "price": 0.0020, "numbers": []},
+    "eg": {"name": "Egypt", "flag": "🇪🇬", "prefix": "+20", "price": 0.0020, "numbers": []},
+    "sa": {"name": "Saudi Arabia", "flag": "🇸🇦", "prefix": "+966", "price": 0.0020, "numbers": []},
+}
+
+USERS = {}
+
+def now_text():
+    return datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+
+def ensure_user(user_id):
+    user_id = str(user_id)
+    if user_id not in USERS:
+        USERS[user_id] = {"balance": 0.0, "referrals": [], "referred_by": None, "rented_number": None, "joined_at": now_text(), "page": {}}
+    user = USERS[user_id]
+    user.setdefault("balance", 0.0)
+    user.setdefault("referrals", [])
+    user.setdefault("referred_by", None)
+    user.setdefault("rented_number", None)
+    user.setdefault("joined_at", now_text())
+    user.setdefault("page", {})
+    return user
+
+def save_data():
+    with open(NUMBERS_FILE, "w", encoding="utf-8") as file: json.dump(COUNTRIES, file, ensure_ascii=False, indent=2)
+    with open(USERS_FILE, "w", encoding="utf-8") as file: json.dump(USERS, file, ensure_ascii=False, indent=2)
+
+def load_data():
+    global COUNTRIES, USERS
+    if os.path.exists(NUMBERS_FILE):
+        try:
+            with open(NUMBERS_FILE, "r", encoding="utf-8") as file: saved = json.load(file)
+            for code, data in COUNTRIES.items():
+                old = saved.get(code, {})
+                numbers = old.get("numbers", [])
+                if not isinstance(numbers, list): numbers = []
+                data["numbers"] = numbers
+        except Exception as error: print(f"خطأ في تحميل numbers.json: {error}")
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as file: USERS = json.load(file)
+        except Exception as error: print(f"خطأ في تحميل users.json: {error}")
+
+def main_inline_menu(user_id):
+    keyboard = [[InlineKeyboardButton("📱 الحصول على رقم", callback_data="countries")]]
+    keyboard.append([InlineKeyboardButton("📊 إحصائياتي", callback_data="stats"), InlineKeyboardButton("🔗 شارك واربح", callback_data="referral")])
+    if int(user_id) == ADMIN_ID: keyboard.append([InlineKeyboardButton("👑 لوحة الملك", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(keyboard)
+
+def reply_menu():
+    return ReplyKeyboardMarkup([["الحصول على رقم", "شارك واربح"],["سحب", "الإحصائيات"],["الإحالات المباشرة", "أرباح الدول"]], resize_keyboard=True)
+
+def countries_menu():
+    keyboard = []
+    items = list(COUNTRIES.items())
+    for index in range(0, len(items), 2):
+        row = []
+        for code, data in items[index:index + 2]:
+            count = len(data["numbers"])
+            label = f"{data['flag']} {data['name']} ({data['prefix']}) | ${data['price']:.4f}"
+            if count == 0: label += " | 0"
+            row.append(InlineKeyboardButton(label, callback_data=f"country:{code}:0"))
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(keyboard)
+
+def numbers_menu(country_code, page):
+    country = COUNTRIES[country_code]
+    numbers = country["numbers"]
+    start = page * NUMBERS_PER_PAGE
+    end = start + NUMBERS_PER_PAGE
+    page_numbers = numbers[start:end]
+    keyboard = []
+    for index, number in enumerate(page_numbers):
+        real_index = start + index
+        keyboard.append([InlineKeyboardButton(f"📱 {number}", callback_data=f"rent:{country_code}:{real_index}")])
+    nav_row = []
+    if page > 0: nav_row.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"country:{country_code}:{page-1}"))
+    if end < len(numbers): nav_row.append(InlineKeyboardButton("🔄 تحديث", callback_data=f"country:{country_code}:{page+1}"))
+    if nav_row: keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("🔁 تغيير الدولة", callback_data="countries"), InlineKeyboardButton("🏠 الرئيسية", callback_data="home")])
+    return InlineKeyboardMarkup(keyboard)
+
+def admin_delete_menu():
+    keyboard = []
+    for code, data in COUNTRIES.items():
+        count = len(data["numbers"])
+        keyboard.append([InlineKeyboardButton(f"🗑️ حذف {data['flag']} {data['name']} | {count}", callback_data=f"delete:{code}")])
+    keyboard.append([InlineKeyboardButton("🗑️ حذف الكل", callback_data="delete:all")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_home(update, user_id):
+    text = f"——— {{ 🌐 SERVICE MENU }} ———\n\nاختر خدمة أو دولة ❄️\nآخر تحديث: {now_text()}"
+    if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=main_inline_menu(user_id))
+    else: await update.message.reply_text(text, reply_markup=main_inline_menu(user_id)); await update.message.reply_text("👇 القائمة الرئيسية", reply_markup=reply_menu())
+
+async def send_stats(update, user_id):
+    user = ensure_user(user_id)
+    rented = user.get("rented_number")
+    rented_text = "لا يوجد"
+    if isinstance(rented, dict): rented_text = rented.get("number", "لا يوجد")
+    elif rented: rented_text = str(rented)
+    text = f"📊 إحصائياتك الخاصة\n🆔 المعرف: {user_id}\n📅 تاريخ الانضمام: {user['joined_at']}\n✅ الرقم المحجوز: {rented_text}\n💰 الرصيد الحالي: ${user['balance']:.2f}\n👥 الإحالات: {len(user['referrals'])}"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="home")]])
+    if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    else: await update.message.reply_text(text, reply_markup=keyboard)
+
+async def send_referral(update, user_id):
+    user = ensure_user(user_id)
+    link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+    text = f"🔗 شارك واربح\nاربح {REFERRAL_BONUS}$ عن كل إحالة نشطة.\nعدد إحالاتك: {len(user['referrals'])}\n\nرابط إحالتك:\n{link}"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="home")]])
+    if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    else: await update.message.reply_text(text, reply_markup=keyboard)
+
+async def set_bot_commands(app: Application):
+    await app.bot.set_my_commands([
+        BotCommand("start", "تشغيل البوت"),
+        BotCommand("getnumber", "الحصول على رقم"),
+        BotCommand("account", "حسابي"),
+        BotCommand("language", "اللغة"),
+        BotCommand("addnumbers", "اضافة ارقام - ادمن"),
+        BotCommand("sendcode", "ارسال كود - ادمن"),
+        BotCommand("status", "حالة البوت - ادمن")
+    ])
+
+async def start(update, context):
+    user_id = str(update.effective_user.id)
+    user = ensure_user(user_id)
+    if context.args and user["referred_by"] is None:
+        referrer_id = context.args[0].replace("ref_", "")
+        if referrer_id in USERS and referrer_id!= user_id:
+            user["referred_by"] = referrer_id
+            USERS[referrer_id]["balance"] += REFERRAL_BONUS
+            USERS[referrer_id]["referrals"].append(user_id)
+            save_data()
+    await send_home(update, user_id)
+
+async def getnumber(update, context):
+    await update.message.reply_text("📱 اختر الدولة والسعر:", reply_markup=countries_menu())
+
+async def account(update, context): await send_stats(update, str(update.effective_user.id))
+async def language(update, context): await update.message.reply_text("العربية متاحة حاليًا 🇪🇬")
+
+async def add_numbers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id!= ADMIN_ID: return
+    try:
+        text = update.message.text.split('\n')
+        country = text[0].split()[1].lower()
+        numbers = [n.strip() for n in text[1:] if n.strip()]
+        if country not in COUNTRIES: await update.message.reply_text("كود الدولة غلط"); return
+        COUNTRIES[country]["numbers"].extend(numbers)
+        save_data()
+        msg = f"🔥 **متاح ارقام جديدة** 🔥\nدولة: {COUNTRIES[country]['name']}\nالعدد: {len(numbers)}\n\nدوس /getnumber عشان تاخد رقم"
+        await context.bot.send_message(chat_id=GROUP_ID, text=msg, parse_mode='Markdown')
+        await update.message.reply_text(f"✅ تم اضافة {len(numbers)} رقم وتم النشر في الجروب")
+    except:
+        await update.message.reply_text("الصيغة غلط. استخدم:\n/addnumbers eg\n+20101...")
+
+async def send_code_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id!= ADMIN_ID: return
+    try:
+        parts = update.message.text.split()
+        number = parts[1]
+        code = parts[2]
+        for user_id, user_data in USERS.items():
+            rented = user_data.get("rented_number")
+            if isinstance(rented, dict) and rented.get("number") == number:
+                await context.bot.send_message(chat_id=int(user_id), text=f"🎉 كودك وصل!\nالرقم: `{number}`\nالكود: `{code}`", parse_mode='Markdown')
+                await context.bot.send_message(chat_id=GROUP_ID, text=f"📢 تم تسليم كود للرقم `{number}`")
+                USERS[user_id]["rented_number"] = None
+                save_data()
+                await update.message.reply_text("✅ تم ارسال الكود للعضو")
+                return
+        await update.message.reply_text("الرقم ده مش محجوز لحد")
+    except:
+        await update.message.reply_text("الصيغة غلط. استخدم:\n/sendcode +20101... 123456")
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id!= ADMIN_ID: return
+    total_numbers = sum(len(v["numbers"]) for v in COUNTRIES.values())
+    total_pending = sum(1 for u in USERS.values() if u.get("rented_number"))
+    msg = f"📊 **حالة البوت**\n\n**المتاح:** {total_numbers}\n**المحجوز:** {total_pending}"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def button(update, context):
+    query = update.callback_query
+    user_id = str(query.from_user.id)
+    user = ensure_user(user_id)
+    await query.answer()
+
+    if query.data == "home": await send_home(update, user_id)
+    elif query.data == "countries": await query.edit_message_text("📱 اختر الدولة والسعر:", reply_markup=countries_menu())
+    elif query.data == "stats": await send_stats(update, user_id)
+    elif query.data == "referral": await send_referral(update, user_id)
+
+    elif query.data == "admin_panel":
+        if int(user_id)!= ADMIN_ID: await query.answer("غير مسموح", show_alert=True); return
+        codes = ", ".join(COUNTRIES.keys())
+        await query.edit_message_text(
+            f"👑 لوحة الإدارة\n"
+            f"1- لرفع ارقام: ارسل ملف TXT واكتب كود الدولة\n"
+            f"2- لاضافة بالكوبي: /addnumbers\n"
+            f"3- للحذف: اضغط الزر تحت\n"
+            f"الاكواد: {codes}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ اضافة ارقام", callback_data="admin_add_info")],
+                [InlineKeyboardButton("🗑️ حذف ارقام", callback_data="admin_delete")],
+                [InlineKeyboardButton("🔙 الرئيسية", callback_data="home")]
+            ])
+        )
+
+    elif query.data == "admin_add_info":
+        codes = "\n".join([f"{v['flag']} {k} = {v['name']}" for k,v in COUNTRIES.items()])
+        await query.edit_message_text(
+            f"➕ طريقة اضافة الارقام:\n\n"
+            f"1- ابعت ملف txt وفي الـ Caption اكتب الكود\n"
+            f"2- او استخدم الامر: /addnumbers eg\n"
+            f"الاكواد المتاحة:\n{codes}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")]])
+        )
+
+    elif query.data == "admin_delete":
+        if int(user_id)!= ADMIN_ID: await query.answer("غير مسموح", show_alert=True); return
+        await query.edit_message_text("اختر الدولة اللي عايز تحذف ارقامها:", reply_markup=admin_delete_menu())
+
+    elif query.data.startswith("delete:"):
+        if int(user_id)!= ADMIN_ID: await query.answer("غير مسموح", show_alert=True); return
+        _, country_code = query.data.split(":")
+        if country_code == "all":
+            for code in COUNTRIES: COUNTRIES[code]["numbers"] = []
+            save_data()
+            await query.edit_message_text("✅ تم حذف جميع الارقام من كل الدول", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_delete")]]))
+        else:
+            country = COUNTRIES.get(country_code)
+            if country:
+                count = len(country["numbers"])
+                country["numbers"] = []
+                save_data()
+                await query.edit_message_text(f"✅ تم حذف {count} رقم من {country['name']}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_delete")]]))
+
+    elif query.data.startswith("country:"):
+        _, country_code, page_text = query.data.split(":")
+        page = int(page_text)
+        country = COUNTRIES.get(country_code)
+        if not country: await query.answer("الدولة غير موجودة", show_alert=True); return
+        if not country["numbers"]: await query.answer("لا توجد أرقام متاحة حاليًا", show_alert=True); return
+        await query.edit_message_text(f"{country['flag']} {country['name']}\nالسعر: ${country['price']:.4f}\nالمتاح: {len(country['numbers'])}\nالصفحة: {page+1}\n\nاختر رقمًا:", reply_markup=numbers_menu(country_code, page))
+
+    elif query.data.startswith("rent:"):
+        _, country_code, index_text = query.data.split(":")
+        country = COUNTRIES.get(country_code)
+        if not country: await query.answer("الدولة غير موجودة", show_alert=True); return
+        index = int(index_text)
+        numbers = country["numbers"]
+        if index < 0 or index >= len(numbers): await query.answer("الرقم لم يعد متاحًا", show_alert=True); return
+        number = numbers.pop(index)
+        USERS[user_id]["rented_number"] = {"country": country_code, "number": number, "at": now_text()}
+        save_data()
+        await query.edit_message_text(f"✅ تم حجز الرقم بنجاح\nالدولة: {country['name']}\nالرقم: `{number}`\n\nيمكنك تغييره أو الرجوع للقائمة الرئيسية.", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔁 تغيير الرقم", callback_data=f"country:{country_code}:0")],[InlineKeyboardButton("🌍 تغيير الدولة", callback_data="countries"), InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]]))
+
+async def handle_file(update, context):
+    if update.message.from_user.id!= ADMIN_ID: return
+    document = update.message.document
+    if not document: return
+    filename = (document.file_name or "").lower()
+    if not filename.endswith(".txt"): await update.message.reply_text("ارفع ملف TXT فقط."); return
+    caption = (update.message.caption or "").strip().lower()
+    country_code = caption.split()[0] if caption else ""
+    if country_code not in COUNTRIES: await update.message.reply_text(f"اكتب كود الدولة في Caption.\nالأكواد المتاحة: {', '.join(COUNTRIES.keys())}"); return
+    telegram_file = await document.get_file()
+    temp_file = "temp_numbers.txt"
+    await telegram_file.download_to_drive(temp_file)
+    with open(temp_file, "r", encoding="utf-8") as file: numbers = [line.strip() for line in file if line.strip()]
+    COUNTRIES[country_code]["numbers"].extend(numbers)
+    save_data()
+    try: os.remove(temp_file)
+    except OSError: pass
+    await update.message.reply_text(f"✅ تمت إضافة {len(numbers)} رقم\nالدولة: {COUNTRIES[country_code]['name']}\nالمتاح الآن: {len(COUNTRIES[country_code]['numbers'])}")
+
+async def handle_text(update, context):
+    text = update.message.text
+    if text == "الحصول على رقم": await getnumber(update, context)
+    elif text == "شارك واربح": await send_referral(update, str(update.effective_user.id))
+    elif text == "الإحصائيات": await send_stats(update, str(update.effective_user.id))
+    elif text == "الإحالات المباشرة": user = ensure_user(update.effective_user.id); await update.message.reply_text(f"👥 الإحالات المباشرة: {len(user['referrals'])}")
+    elif text == "أرباح الدول": await update.message.reply_text("💰 أرباح الدول\nسيتم تفعيلها بعد إضافة نظام المحاسبة.")
+    elif text == "سحب": await update.message.reply_text("💸 السحب غير مفعّل حاليًا.")
+
+async def error_handler(update, context): logging.error("Unhandled error", exc_info=context.error)
+
+def main():
+    logging.basicConfig(format=("%(asctime)s - %(name)s - %(levelname)s - %(message)s"), level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    load_data()
+    app = (Application.builder().token(TOKEN).post_init(set_bot_commands).build())
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("getnumber", getnumber))
+    app.add_handler(CommandHandler("account", account))
+    app.add_handler(CommandHandler("language", language))
+    app.add_handler(CommandHandler("addnumbers", add_numbers_cmd))
+    app.add_handler(CommandHandler("sendcode", send_code_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(error_handler)
+    print("✅ البوت شغال")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__": main()
