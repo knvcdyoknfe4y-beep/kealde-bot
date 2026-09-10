@@ -27,7 +27,7 @@ if TOKEN is None:
     raise RuntimeError("حط التوكن في Environment Variables بتاعت Render باسم TOKEN")
 
 ADMIN_ID = 6104865069
-GROUP_ID = -1001234567890 # <--- حط ايدي الجروب هنا عشان الاعلان
+GROUP_ID = -5302734190 # <--- حط ايدي الجروب هنا عشان الاعلان
 BOT_USERNAME = "bot_KEALDE_Vip_BOT"
 NUMBERS_FILE = "numbers.json"
 USERS_FILE = "users.json"
